@@ -1,0 +1,142 @@
+#include <quakelib/common/entity_parser.h>
+
+#include <iostream>
+#include <regex>
+#include <sstream>
+#include <string>
+
+namespace quakelib {
+
+  using std::string;
+
+  static std::vector<std::string> rexec_vec(std::string line, const std::string &regexstr) {
+    std::stringstream results;
+    std::regex re(regexstr, std::regex::icase);
+
+    std::vector<std::string> matches;
+    const std::sregex_token_iterator end;
+    for (std::sregex_token_iterator it(line.begin(), line.end(), re, 1); it != end; it++) {
+      matches.push_back(*it);
+    }
+
+    return matches;
+  }
+
+  inline std::string &ltrim(std::string &s, const char *t = " ") {
+    s.erase(0, s.find_first_not_of(t));
+    return s;
+  }
+
+  void EntityParser::ParseEntites(const std::string &buffer, EntityParsedFunc fn) {
+    auto strstr = std::stringstream(buffer);
+    std::vector<ParsedEntity *> objects;
+    ParsedEntity *current = nullptr;
+    bool foundWorldSpawn = false;
+
+    for (std::string line; std::getline(strstr, line);) {
+      std::erase(line, '\r');
+      if (line.empty()) {
+        continue;
+      }
+      line = ltrim(line);
+
+      // HACK: we better analyze the face UV's to figure out format.
+      if (line == "// Format: Valve") {
+        // mapVersion = VALVE_VERSION;
+      }
+      if (line.starts_with("//")) {
+        continue;
+      }
+      if (line == "{") {
+        ParsedEntity *newobj = new ParsedEntity;
+        if (current == nullptr) {
+          objects.push_back(newobj);
+          current = newobj;
+        } else {
+          newobj->parent = current;
+          current->children.push_back(newobj);
+          current->type = EntityType::SOLID;
+          current = newobj;
+        }
+        continue;
+      }
+      if (line == "}") {
+        if (current != nullptr) {
+          current = current->parent;
+        }
+        continue;
+      }
+      if (current != nullptr) {
+        current->lines << line << std::endl;
+        // if we find a model, it's a solid
+        if (current->parent == nullptr && line.rfind("\"model\" \"*", 0) != std::string::npos) {
+          current->type = EntityType::SOLID;
+        }
+        // if it is worldspawn, it's a solid
+        if (!foundWorldSpawn && line.rfind("\"classname\" \"worldspawn\"", 0)) {
+          current->type = EntityType::WORLDSPAWN;
+          foundWorldSpawn = true;
+        }
+      }
+    }
+
+    for (const auto &obj : objects) {
+      fn(obj);
+    }
+
+    return;
+  }
+
+  void Entity::FillFromParsed(ParsedEntity *pe) {
+    for (std::string l; std::getline(pe->lines, l);) {
+      auto matches = rexec_vec(l, R"(\"([\s\S]*?)\")");
+      if (matches.empty()) {
+        continue;
+      }
+
+      if (matches[0] == "classname") {
+        m_classname = matches[1];
+        continue;
+      }
+
+      if (matches[0] == "_tb_name") {
+        m_tbName = matches[1];
+        continue;
+      }
+
+      if (matches[0] == "_tb_type") {
+        m_tbType = matches[1];
+        continue;
+      }
+
+      m_attributes.emplace(matches[0], matches[1]);
+    }
+  }
+
+  void PointEntity::FillFromParsed(ParsedEntity *pe) {
+    Entity::FillFromParsed(pe);
+    m_origin = AttributeVec3("origin");
+    m_attributes.erase("origin");
+    m_angle = AttributeFloat("angle");
+    m_attributes.erase("angle");
+  }
+
+  void SolidEntity::FillFromParsed(ParsedEntity *pe) {
+    Entity::FillFromParsed(pe);
+    m_hasPhongShading = AttributeFloat("_phong");
+    m_attributes.erase("_phong");
+  }
+
+  void WorldSpawnEntity::FillFromParsed(ParsedEntity *pe) {
+    SolidEntity::FillFromParsed(pe);
+    auto wadstr = AttributeStr("wad");
+    std::istringstream ss(wadstr);
+
+    for (std::string item; std::getline(ss, item, ';');) {
+      m_wads.push_back(item.substr(item.find_last_of("/\\") + 1));
+    }
+
+    m_attributes.erase("wad");
+  }
+
+} // namespace quakelib
